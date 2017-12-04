@@ -1,0 +1,213 @@
+#!/bin/bash -
+#
+# This script builds _and checks_ all the distribution files from my source
+# directory. It's very selective because I've got a lot of historical and
+# other 'junk' in the same directory. (120Mb at the last count!)
+#
+
+trap "exit 1" 1 2 3 15
+
+DIR="`pwd`"
+TMPDIR=/tmp/Linux-86
+TMPSRC=linux86
+ARCDIR="$DIR"/dev86arc
+
+SRCDIRS='bcc cpp unproto as ar ld copt man elksemu dis88 tests libbsd bin86'
+DISTFILES='Makefile README COPYING Changes Contributors MAGIC
+           mkcompile GNUmakefile libcompat ifdef.c makefile.in Mk_dist'
+
+VERSION="$1"
+TMPDIST=$TMPDIR/$TMPSRC
+rm -rf ${TMPDIR}
+mkdir -p ${TMPDIST}
+
+[ "$VERSION" = '' ] && {
+   echo 'Usage: $0 <version>' 1>&2
+   exit 1
+}
+
+#-----------------------------------------------------------------------
+
+echo Copying most program files.
+
+make -s -C bin86 ungrab 	|| exit
+cp -a $DISTFILES $SRCDIRS ${TMPDIST}
+
+#-----------------------------------------------------------------------
+
+echo Copying libc.
+
+LIBC_FILES='Makefile Make.defs crt0.c
+      	    README COPYING KERNEL
+      	    New_subdir Pre_main Config_sh Config.dflt'
+
+mkdir ${TMPDIST}/libc
+
+(
+  cd libc
+  LIBC_DIRS="`for i in */Makefile */Config; do dirname $i; done | sort -u`"
+  cp -a $LIBC_FILES include $LIBC_DIRS ${TMPDIST}/libc/.
+)
+
+#-----------------------------------------------------------------------
+
+echo Copying bootblocks and doselks.
+make -s -C bootblocks distribution
+make -s -C doselks distribution
+
+mkdir ${TMPDIST}/bootblocks
+( cd ${TMPDIST}/bootblocks ; tar xzf /tmp/bootblocks.tar.gz )
+
+mkdir ${TMPDIST}/doselks
+( cd ${TMPDIST}/doselks  ; tar xzf /tmp/doselks.tar.gz )
+
+[ "`id -un`" = "root" ] && {
+  chown -R root:0 ${TMPDIST}
+  chmod -R og=u-w ${TMPDIST}
+}
+
+rm -f /tmp/bootblocks.tar.gz /tmp/doselks.tar.gz /tmp/libc-8086-$VERSION.tar.gz
+
+MINOR=${VERSION##*.}
+MAJOR=${VERSION%.*}
+MID=${MAJOR##*.}
+MAJOR=${MAJOR%.*}
+OLDVER=
+
+case "$VERSION" in
+0.0.0 )  BASEVER=0.0.0.0 ;;	# Naa.
+*.0.0 )  BASEVER=$((MAJOR-1)).$MID.$MINOR ;;
+*.*.0 )  BASEVER=$MAJOR.$((MID-1)).$MINOR ;;
+* )      BASEVER=$MAJOR.$MID.$((MINOR-1))
+         OLDVER=$MAJOR.$MID.0
+         ;;
+esac
+if [ "$MAJOR.$MID.$((MINOR-1))" != "$BASEVER" ]
+then PATCHNAME="$VERSION-$BASEVER"
+else PATCHNAME="$VERSION"
+fi
+
+[ -f $ARCDIR/Dev86src-$BASEVER.tar.gz ] && {
+   echo "Extracting previous version ($BASEVER)"
+
+   mkdir ${TMPDIST}.tmp
+   ( cd ${TMPDIST}.tmp
+     tar xzf $ARCDIR/Dev86src-$BASEVER.tar.gz
+     mv * ${TMPDIST}.old
+   )
+   rmdir ${TMPDIST}.tmp
+}
+
+[ "$OLDVER" != "" -a -f $ARCDIR/Dev86src-$OLDVER.tar.gz ] && {
+   echo "Extracting previous version ($OLDVER)"
+
+   mkdir ${TMPDIST}.tmp
+   ( cd ${TMPDIST}.tmp
+     tar xzf $ARCDIR/Dev86src-$OLDVER.tar.gz
+     mv * ${TMPDIST}.vold
+   )
+   rmdir ${TMPDIST}.tmp
+}
+
+# ARCDIR=${TMPDIR}/arc ; mkdir -p ${ARCDIR}
+cd ${TMPDIST}
+echo COPY COMPLETE -- Switched to ${TMPDIST}, ARCDIR now $ARCDIR
+echo
+
+#-----------------------------------------------------------------------
+# 
+#
+
+echo 'Ensuring clean tree'
+
+cd ${TMPDIST}
+  make -s clean realclean
+  mv as/obj1 ${TMPDIST}-obj1
+  EXCL="`find .         -name '*.o'    -o -name '*.obj'	\
+                     -o -name '*.lib'  -o -name '*.bak'	\
+		     -o -name '*~'     -o -name '*.exe'	\
+		     -o -name '*.orig' -o -name '*.rej'	\
+		     `"
+  mv ${TMPDIST}-obj1 as/obj1
+  rm -f $EXCL
+  rm -f `find . -type l`
+
+cd ${TMPDIR}
+
+[ -d ${TMPSRC}.old ] && {
+echo "Generating patch against version $BASEVER."
+
+mv ${TMPSRC}.old/bootblocks boot.old
+mv ${TMPSRC}/bootblocks boot
+
+diff -Nurd ${TMPSRC}.old ${TMPSRC} > ${ARCDIR}/patch-$PATCHNAME
+
+mv boot.old ${TMPSRC}.old/bootblocks
+mv boot ${TMPSRC}/bootblocks
+
+diff -Nurd ${TMPSRC}.old/bootblocks ${TMPSRC}/bootblocks >> ${ARCDIR}/patch-$PATCHNAME
+
+gzip -f9 ${ARCDIR}/patch-$PATCHNAME
+}
+
+[ -d ${TMPSRC}.vold ] && {
+echo "Generating patch against version $OLDVER."
+
+mv ${TMPSRC}.vold/bootblocks boot.old
+mv ${TMPSRC}/bootblocks boot
+
+diff -Nurd ${TMPSRC}.vold ${TMPSRC} > ${ARCDIR}/patch-$VERSION-$OLDVER
+
+mv boot.old ${TMPSRC}.vold/bootblocks
+mv boot ${TMPSRC}/bootblocks
+
+diff -Nurd ${TMPSRC}.vold/bootblocks ${TMPSRC}/bootblocks >> ${ARCDIR}/patch-$VERSION-$OLDVER
+
+gzip -f9 ${ARCDIR}/patch-$VERSION-$OLDVER
+}
+
+echo Creating full source archive.
+ln -s ${TMPSRC} dev86-$VERSION
+tar cf ${ARCDIR}/Dev86src-$VERSION.tar dev86-$VERSION/*
+gzip -f9 ${ARCDIR}/Dev86src-$VERSION.tar
+
+echo Creating as86 source archive.
+ln -s ${TMPSRC}/as as86-$VERSION
+cp -p ${TMPSRC}/man/as86.1 as86-$VERSION/as86.1
+cp -p ${TMPSRC}/COPYING as86-$VERSION/COPYING
+echo '#define VERSION "'"$VERSION"'"' > as86-$VERSION/version.h
+tar cf ${ARCDIR}/as86-$VERSION.tar `find as86-$VERSION/* -prune -type f`
+gzip -f9 ${ARCDIR}/as86-*.tar
+
+echo Creating bin86 source archive.
+make -s -C ${TMPSRC}/bin86 VERSION=${VERSION} grab 
+ln -s ${TMPSRC}/bin86 bin86-$VERSION
+echo '#define VERSION "'"$VERSION"'"' > bin86-$VERSION/ld/version.h
+tar chf ${ARCDIR}/bin86-$VERSION.tar bin86-$VERSION
+make -s -C ${TMPSRC}/bin86 ungrab
+gzip -f9 ${ARCDIR}/bin86-*.tar
+
+###################################################################
+
+echo Compile up the binaries.
+
+cd ${TMPDIR} || exit 1
+mkdir -p ${TMPDIST}.ins
+make -C ${TMPDIST} install install-other \
+        ARFLAGS=q ELKSSRC=/dev/null \
+        DIST=${TMPDIST}.ins 'ASLDDIR=$(BINDIR)' || 
+    exit
+make -C ${TMPDIST} other || exit
+tar cf ${ARCDIR}/Dev86bin-$VERSION.tar -C ${TMPDIST}.ins .
+rm -f ${ARCDIR}/Dev86clb-$VERSION.zip Bcc
+ln -s ${TMPDIST} Bcc
+
+zip -9rpk ${ARCDIR}/Dev86clb-$VERSION.zip \
+ Bcc/lib/crt0.o Bcc/lib/libc.a Bcc/lib/libbsd.a \
+ Bcc/lib/libdos.a Bcc/lib/libc_f.a Bcc/lib/libc_s.a \
+ Bcc/lib/i386/crt0.o Bcc/lib/i386/libc.a  || exit
+rm Bcc
+
+gzip -9f ${ARCDIR}/Dev86bin-$VERSION.tar || exit
+
+echo Process completed.
